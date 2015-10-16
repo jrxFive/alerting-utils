@@ -7,7 +7,7 @@ A set of individual golang CLI tools. Follows the practice Consul checks, but ca
 * Exit code 1 - Check is warning
 * Any other code - Check is failing
 
-##Sensu stlye [Checks](https://sensuapp.org/docs/latest/checks)
+##Sensu style [Checks](https://sensuapp.org/docs/latest/checks)
 * 0 for OK
 * 1 for WARNING
 * 2 for CRITICAL
