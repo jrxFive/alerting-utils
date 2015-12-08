@@ -95,9 +95,9 @@ func boronMain() int {
 
 	defer os.Remove(temporaryConfig)
 
-	measurementResult, err := executeTeleGraphite(TelegrafLocation, temporaryConfig, Plugin, Measurement, Tags)
+	measurementResult, err := executeTelegraf(TelegrafLocation, temporaryConfig, Plugin, Measurement, Tags)
 	if err != nil || measurementResult == math.MaxFloat64 {
-		fmt.Fprintf(os.Stderr, "Error could not find measurement: %s for specified plugin: %s\n", Measurement, Plugin)
+		fmt.Fprintf(os.Stderr, "Error could not find measurement: %s for specified plugin: %s\n err: ", Measurement, Plugin, err)
 		return 1
 	}
 
@@ -152,7 +152,7 @@ func writeTemplate(Plugin string, PluginParameters string, IP string, Port int, 
 
 //Executes Telegraf in STDOUT mode with the generated config file.
 //Parses STDOUT and abstracts value
-func executeTeleGraphite(TelegrafLocation, Config, Plugin, Measurement, Tags string) (float64, error) {
+func executeTelegraf(TelegrafLocation, Config, Plugin, Measurement, Tags string) (float64, error) {
 	cmd := exec.Command(TelegrafLocation, "-config", Config, "-filter", Plugin, "-test", "|", "grep", Measurement)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
