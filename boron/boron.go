@@ -2,10 +2,9 @@ package main
 
 import (
 	"bufio"
-	"errors"
 	"flag"
 	"fmt"
-	"github.com/jrxfive/consulchecks/boron/Godeps/_workspace/src/github.com/satori/go.uuid"
+	"github.com/satori/go.uuid"
 	"io/ioutil"
 	"math"
 	"math/rand"
@@ -19,23 +18,22 @@ import (
 
 const usageText = `Usage: boron [options]
 Options:
-  -ip=""                   IP of service, default localhost
-  -port=                   Port of Service, default 8000
-  -protocol                Protocol of Service, default empty ie tcp:// or http://
-  -service                 To enable Service parameters in template generation, default false
   -tags                    Tags to determine correct measurement
   -measurement             Single Telegraf timemeasurement to check against
-  -plugin                  Telegraf Plugin name
-  -plugin-parameters       Parameters for Telegraf Plugin, separator '|'
+  -template-file           A provided and working telegraf configuration with only one plugin
+  -plugin                  Telegraf Plugin name, use when boron is generating the configuration
+  -plugin-parameters       Parameters for Telegraf Plugin, separator '|', use when boron is generating the configuration
   -telegraf-location       Absolute path of telegraf binary
-  -working-location        Working location to generate temporary plugin files
+  -working-location        Working location to generate temporary plugin files, use when boron is generating the configuration
   -lessthan                Warning and Critical values will notify if less than
   -warning=                Exits with code 1 if exceeded, Optional
   -critical=               Exits with code 2 if exceeded, Required
+
 Examples:
-	./boron -plugin mem --working-location . -telegraf-location ./telegraf -measurement 'mem_used' -critical 0
-	./boron -plugin cpu --working-location . -telegraf-location ./telegraf -plugin-parameters 'percpu = true|totalcpu = true|drop = ["cpu_time"]' -measurement 'cpu_usage_idle' -critical 0 -tags 'cpu="cpu0"'
-	./boron -warning=20971520 -critical=104857600 -measurement 'some.example.com.host.10.0.0.1.port.6379.redis_used_memory' -plugin redis -telegraf-location './telegraf' -service -ip "0.0.0.0" -port 6379 -protocol "tcp://" -plugin-parameters "key = value|key2 = value2"
+	./boron -plugin mem --working-location . -telegraf-location ./telegraf -measurement 'mem_used_percent' -critical 0
+	./boron -plugin cpu --working-location . -telegraf-location ./telegraf -plugin-parameters 'percpu = true|totalcpu = true|drop = ["cpu_time"]' -measurement 'cpu_usage_idle' -critical 0 -tags 'cpu=cpu0'
+	./boron -template-file mem.toml -telegraf-location ./telegraf -measurement 'mem_used_percent' -critical 0
+    ./boron -template-file cpu.toml -telegraf-location ./telegraf -measurement 'cpu_usage_idle' -critical 0 -tags 'cpu=cpu0'
 `
 
 func main() {
@@ -45,11 +43,8 @@ func main() {
 func boronMain() int {
 
 	var (
-		IP               string
-		Port             int
-		Protocol         string
-		Service          bool
 		Measurement      string
+		TemplateFile     string
 		Plugin           string
 		PluginParameters string
 		Tags             string
@@ -66,14 +61,9 @@ func boronMain() int {
 	boronFlags.Usage = func() { printUsage() }
 
 	//
-	boronFlags.StringVar(&IP, "ip", "localhost", "IP of Service")
-	boronFlags.IntVar(&Port, "port", 8000, "Port of Service")
-	boronFlags.StringVar(&Protocol, "protocol", "", "Protocol of Service i.e http:// or tcp://")
-	boronFlags.BoolVar(&Service, "service", false, "Query a Service which requires an array of Protocol,IP,Port")
-
-	//
 	boronFlags.StringVar(&Tags, "tags", "", "tags to determine correct measurement")
 	boronFlags.StringVar(&Measurement, "measurement", "", "Single Telegraf timemeasurement to check against")
+	boronFlags.StringVar(&TemplateFile, "template-file", "", "A valid telegraf configuration file with one plugin specified")
 	boronFlags.StringVar(&Plugin, "plugin", "", "Telegraf Plugin name")
 	boronFlags.StringVar(&PluginParameters, "plugin-parameters", "", "Parameters for Telegraf Plugin")
 	boronFlags.StringVar(&TelegrafLocation, "telegraf-location", "/usr/bin/telegraf", "Absolute path of telegraf binary")
@@ -88,17 +78,36 @@ func boronMain() int {
 		return 1
 	}
 
-	temporaryConfig, err := writeTemplate(Plugin, PluginParameters, IP, Port, Service, Protocol, WorkingLocation, TelegrafTemplate)
-	if err != nil {
-		return 2
-	}
+	var configurationLocation string
+	var measurementResult float64
 
-	defer os.Remove(temporaryConfig)
+	if TemplateFile != "" {
+		configurationLocation = TemplateFile
 
-	measurementResult, err := executeTelegraf(TelegrafLocation, temporaryConfig, Plugin, Measurement, Tags)
-	if err != nil || measurementResult == math.MaxFloat64 {
-		fmt.Fprintf(os.Stderr, "Error could not find measurement: %s for specified plugin: %s\n err: ", Measurement, Plugin, err)
-		return 1
+		result, err := executeProvidedTelegraf(TelegrafLocation, configurationLocation, Measurement, Tags)
+		if err != nil || measurementResult == math.MaxFloat64 {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+
+		measurementResult = result
+
+	} else {
+
+		configurationLocation, err := writeTemplate(Plugin, PluginParameters, WorkingLocation, TelegrafTemplate)
+		if err != nil {
+			return 2
+		}
+
+		defer os.Remove(configurationLocation)
+
+		result, err := executeGeneratedTelegraf(TelegrafLocation, configurationLocation, Plugin, Measurement, Tags)
+		if err != nil || measurementResult == math.MaxFloat64 {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+
+		measurementResult = result
 	}
 
 	exitCode := thresholdChecker(measurementResult, Measurement, LessThan, Warning, Critical, randomFloat)
@@ -111,7 +120,7 @@ func splitParameters(PluginParameters string) []string {
 }
 
 //Generates template  file for given plugin
-func writeTemplate(Plugin string, PluginParameters string, IP string, Port int, Service bool, Protocol string, WorkingLocation, Template string) (string, error) {
+func writeTemplate(Plugin string, PluginParameters string, WorkingLocation, Template string) (string, error) {
 
 	genUUID := uuid.NewV4()
 
@@ -133,12 +142,8 @@ func writeTemplate(Plugin string, PluginParameters string, IP string, Port int, 
 	defer wr.Flush()
 
 	tp := TelegrafPlugin{
-		Plugin:   Plugin,
-		KV:       splitParameters(PluginParameters),
-		IP:       IP,
-		Port:     Port,
-		Protocol: Protocol,
-		Service:  Service,
+		Plugin: Plugin,
+		KV:     splitParameters(PluginParameters),
 	}
 
 	err = t.Execute(wr, tp)
@@ -150,9 +155,76 @@ func writeTemplate(Plugin string, PluginParameters string, IP string, Port int, 
 	return temporaryFileLocation, nil
 }
 
+func filterTelegrafResults(Output []byte, Measurement, Tags string) (float64, error) {
+
+	re := regexp.MustCompile(fmt.Sprintf(`(%s),(.*)value=(\d+\.?\d+)\s+(\d*)|(%s)\s+value=(\d+\.?\d+)\s+(\d*)`, Measurement, Measurement))
+	regexResult := re.FindAllStringSubmatch(string(Output), -1)
+
+	if len(regexResult) >= 1 {
+		for _, group := range regexResult {
+
+			measurementName := group[1]
+			measurementTags := group[2]
+			measurementValue := group[3]
+			measurementNoTagsValue := group[6]
+
+			if measurementName != "" { //measurement has tags
+
+				if strings.Contains(measurementTags, Tags) {
+					f, err := strconv.ParseFloat(measurementValue, 64)
+					if err != nil {
+						return math.MaxFloat64, fmt.Errorf("Measurement: %s not a float64 value", Measurement)
+					}
+					return f, nil
+				}
+
+				continue
+
+			} else { //no tags first measurement name match found will return
+
+				f, err := strconv.ParseFloat(measurementNoTagsValue, 64)
+				if err != nil {
+					return math.MaxFloat64, fmt.Errorf("Measurement: %s not a float64 value", Measurement)
+				}
+				return f, nil
+
+			}
+		}
+	} else {
+		return math.MaxFloat64, fmt.Errorf("Measurement: %s not found", Measurement)
+	}
+	return math.MaxFloat64, fmt.Errorf("Measurement: %s not found", Measurement)
+
+}
+
+//Executes Telegraf in STDOUT mode with the provided config file.
+//Parses STDOUT and abstracts value
+func executeProvidedTelegraf(TelegrafLocation, Config, Measurement, Tags string) (float64, error) {
+	cmd := exec.Command(TelegrafLocation, "-config", Config, "-test", "|", "grep", Measurement)
+	stdout, err := cmd.StdoutPipe()
+
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return math.MaxFloat64, err
+	}
+
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return math.MaxFloat64, err
+	}
+
+	r, err := ioutil.ReadAll(stdout)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return math.MaxFloat64, err
+	}
+
+	return filterTelegrafResults(r, Measurement, Tags)
+}
+
 //Executes Telegraf in STDOUT mode with the generated config file.
 //Parses STDOUT and abstracts value
-func executeTelegraf(TelegrafLocation, Config, Plugin, Measurement, Tags string) (float64, error) {
+func executeGeneratedTelegraf(TelegrafLocation, Config, Plugin, Measurement, Tags string) (float64, error) {
 	cmd := exec.Command(TelegrafLocation, "-config", Config, "-filter", Plugin, "-test", "|", "grep", Measurement)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -171,38 +243,7 @@ func executeTelegraf(TelegrafLocation, Config, Plugin, Measurement, Tags string)
 		return math.MaxFloat64, err
 	}
 
-	re := regexp.MustCompile(fmt.Sprintf(`.*(\[\]|\[.*\])\s+(%s)\s+value=(\w+)`, Measurement))
-	regexResult := re.FindAllStringSubmatch(string(r), -1)
-
-	if len(regexResult) >= 1 {
-		for _, group := range regexResult {
-			tags := group[1]
-			value := group[3]
-
-			if tags == "[]" {
-
-				f, err := strconv.ParseFloat(value, 64)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, errors.New(fmt.Sprintf("Measurement: %s not a float64 value", Measurement)))
-					return math.MaxFloat64, errors.New(fmt.Sprintf("Measurement: %s not a float64 value", Measurement))
-				}
-				return f, nil
-
-			} else if strings.Contains(tags, Tags) {
-
-				f, err := strconv.ParseFloat(value, 64)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, errors.New(fmt.Sprintf("Measurement: %s not a float64 value", Measurement)))
-					return math.MaxFloat64, errors.New(fmt.Sprintf("Measurement: %s not a float64 value", Measurement))
-				}
-				return f, nil
-			}
-			continue
-		}
-	} else {
-		return math.MaxFloat64, errors.New(fmt.Sprintf("Measurement: %s not found", Measurement))
-	}
-	return math.MaxFloat64, errors.New(fmt.Sprintf("Measurement: %s not found", Measurement))
+	return filterTelegrafResults(r, Measurement, Tags)
 }
 
 func messageGenerator(thresholdType string, thresholdValue, curerntValue float64, measurement string) {
