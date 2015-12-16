@@ -157,7 +157,7 @@ func writeTemplate(Plugin string, PluginParameters string, WorkingLocation, Temp
 
 func filterTelegrafResults(Output []byte, Measurement, Tags string) (float64, error) {
 
-	re := regexp.MustCompile(fmt.Sprintf(`(%s),(.*)value=(\d+\.?\d+)\s+(\d*)|(%s)\s+value=(\d+\.?\d+)\s+(\d*)`, Measurement, Measurement))
+	re := regexp.MustCompile(fmt.Sprintf(`>\s+(%s),(.*)value=(\d+\.?\d*)\s+(\d*)|(%s)\s+value=(\d+\.?\d*)\s+(\d*)`, Measurement, Measurement))
 	regexResult := re.FindAllStringSubmatch(string(Output), -1)
 
 	if len(regexResult) >= 1 {
